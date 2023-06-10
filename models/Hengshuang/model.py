@@ -9,8 +9,9 @@ class TransitionDown(nn.Module):
         super().__init__()
         self.sa = PointNetSetAbstraction(k, 0, nneighbor, channels[0], channels[1:], group_all=False, knn=True)
         
-    def forward(self, xyz, points):
-        return self.sa(xyz, points)
+    # Entry3
+    def forward(self, xyz, points, super_points):
+        return self.sa(xyz, points, super_points)
 
 
 class TransitionUp(nn.Module):
@@ -64,13 +65,14 @@ class Backbone(nn.Module):
             self.transformers.append(TransformerBlock(channel, cfg.model.transformer_dim, nneighbor))
         self.nblocks = nblocks
     
-    def forward(self, x):
+    def forward(self, x, super_points=None):
+        # Entry2
         xyz = x[..., :3]
         points = self.transformer1(xyz, self.fc1(x))[0]
 
         xyz_and_feats = [(xyz, points)]
         for i in range(self.nblocks):
-            xyz, points = self.transition_downs[i](xyz, points)
+            xyz, points, super_points = self.transition_downs[i](xyz, points, super_points)
             points = self.transformers[i](xyz, points)[0]
             xyz_and_feats.append((xyz, points))
         return points, xyz_and_feats
@@ -125,8 +127,9 @@ class PointTransformerSeg(nn.Module):
             nn.Linear(64, n_c)
         )
     
-    def forward(self, x):
-        points, xyz_and_feats = self.backbone(x)
+    def forward(self, x, super_points=None):
+        # Entry1
+        points, xyz_and_feats = self.backbone(x, super_points)
         xyz = xyz_and_feats[-1][0]
         points = self.transformer2(xyz, self.fc2(points))[0]
 

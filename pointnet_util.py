@@ -73,6 +73,31 @@ def farthest_point_sample(xyz, npoint):
     return centroids
 
 
+def super_point_sample(xyz, npoint, super_points):
+    device = xyz.device
+    B, N, C = xyz.shape
+    out_idx = torch.zeros(B, npoint, dtype=torch.long).to(device)
+    for b in range(B):
+        no_cls = len(torch.unique(super_points[b]))
+        npoint_cls = int(np.ceil(npoint / no_cls))
+        
+        idx = torch.tensor([]).to(device)
+        rem = torch.tensor([]).to(device)
+        for class_label in torch.unique(super_points[b]):
+            # print("class_label" + str(class_label))
+            class_indices = torch.nonzero(super_points[b] == class_label).flatten()
+            # print(class_indices)
+            temp = torch.randperm(class_indices.size(0))
+            random_indices = class_indices[temp[:npoint_cls]].to(device)
+            idx = torch.cat((idx, random_indices))
+            rem = torch.cat((rem, class_indices[temp[npoint_cls:]]))
+        idx = idx[torch.randperm(idx.size(0))[:npoint]]
+        idx = torch.cat((idx,rem))[:npoint]
+        for i in range(npoint):
+            out_idx[b][i] = idx[i]
+    return out_idx
+
+
 def query_ball_point(radius, nsample, xyz, new_xyz):
     """
     Input:
@@ -96,7 +121,8 @@ def query_ball_point(radius, nsample, xyz, new_xyz):
     return group_idx
 
 
-def sample_and_group(npoint, radius, nsample, xyz, points, returnfps=False, knn=False):
+# return new_super_points
+def sample_and_group(npoint, radius, nsample, xyz, points, returnfps=False, knn=False, super_points=None):
     """
     Input:
         npoint:
@@ -110,7 +136,15 @@ def sample_and_group(npoint, radius, nsample, xyz, points, returnfps=False, knn=
     """
     B, N, C = xyz.shape
     S = npoint
-    fps_idx = farthest_point_sample(xyz, npoint) # [B, npoint]
+    if super_points == None:
+        fps_idx = farthest_point_sample(xyz, npoint) # [B, npoint]
+        new_super_points = None
+    else:
+        fps_idx = super_point_sample(xyz, npoint, super_points)
+        new_super_points = torch.zeros_like(fps_idx)
+        for b in range(super_points.shape[0]):
+            new_super_points[b] = super_points[b][fps_idx[b]]
+
     torch.cuda.empty_cache()
     new_xyz = index_points(xyz, fps_idx)
     torch.cuda.empty_cache()
@@ -133,7 +167,7 @@ def sample_and_group(npoint, radius, nsample, xyz, points, returnfps=False, knn=
     if returnfps:
         return new_xyz, new_points, grouped_xyz, fps_idx
     else:
-        return new_xyz, new_points
+        return new_xyz, new_points, new_super_points
 
 
 def sample_and_group_all(xyz, points):
@@ -172,7 +206,9 @@ class PointNetSetAbstraction(nn.Module):
             last_channel = out_channel
         self.group_all = group_all
 
-    def forward(self, xyz, points):
+    # Entry4
+    # return superpoints as well
+    def forward(self, xyz, points, super_points):
         """
         Input:
             xyz: input points position data, [B, N, C]
@@ -181,10 +217,14 @@ class PointNetSetAbstraction(nn.Module):
             new_xyz: sampled points position data, [B, S, C]
             new_points_concat: sample points feature data, [B, S, D']
         """
+        new_super_points = None
         if self.group_all:
             new_xyz, new_points = sample_and_group_all(xyz, points)
         else:
-            new_xyz, new_points = sample_and_group(self.npoint, self.radius, self.nsample, xyz, points, knn=self.knn)
+            if super_points == None:
+                new_xyz, new_points, _ = sample_and_group(self.npoint, self.radius, self.nsample, xyz, points, knn=self.knn)
+            else:
+                new_xyz, new_points, new_super_points = sample_and_group(self.npoint, self.radius, self.nsample, xyz, points, super_points=super_points, knn=self.knn)
         # new_xyz: sampled points position data, [B, npoint, C]
         # new_points: sampled points data, [B, npoint, nsample, C+D]
         new_points = new_points.permute(0, 3, 2, 1) # [B, C+D, nsample,npoint]
@@ -193,7 +233,7 @@ class PointNetSetAbstraction(nn.Module):
             new_points =  F.relu(bn(conv(new_points)))
 
         new_points = torch.max(new_points, 2)[0].transpose(1, 2)
-        return new_xyz, new_points
+        return new_xyz, new_points, new_super_points
 
 
 class PointNetSetAbstractionMsg(nn.Module):
